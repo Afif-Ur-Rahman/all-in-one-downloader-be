@@ -36,19 +36,21 @@ const isAudioOnly = (format: RawFormat) =>
 
 const hasAudioTrack = (format: RawFormat) => format.acodec != null && format.acodec !== "none";
 
-// Prefer H.264 (plays everywhere), then MP4, then higher bitrate
 const score = (format: RawFormat) =>
   (format.vcodec?.startsWith("avc") ? 2000000 : 0) +
   (format.ext === "mp4" ? 1000000 : 0) +
   (format.tbr ?? 0);
 
-const sizeLabel = (format: RawFormat): string => {
+const sizeLabel = (format: RawFormat, duration?: number): string => {
   if (format.filesize) return formatBytes(format.filesize);
   if (format.filesize_approx) return `~${formatBytes(format.filesize_approx)}`;
+  if (format.tbr && duration) {
+    return `~${formatBytes(((format.tbr * 1000) / 8) * duration)}`;
+  }
   return "—";
 };
 
-const buildVideoFormats = (formats: RawFormat[]): VideoFormat[] => {
+const buildVideoFormats = (formats: RawFormat[], duration?: number): VideoFormat[] => {
   const byHeight = new Map<number, RawFormat>();
 
   formats.filter(isVideoFormat).forEach((format) => {
@@ -64,19 +66,25 @@ const buildVideoFormats = (formats: RawFormat[]): VideoFormat[] => {
       kind: "video" as const,
       quality: `${height}p`,
       extension: format.ext.toUpperCase(),
-      size: sizeLabel(format),
+      size: sizeLabel(format, duration),
       hasAudio: hasAudioTrack(format),
     }));
 };
 
-const buildAudioFormats = (formats: RawFormat[]): VideoFormat[] => {
+const buildAudioFormats = (formats: RawFormat[], duration?: number): VideoFormat[] => {
   const best = formats
     .filter(isAudioOnly)
     .sort((a, b) => (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0))[0];
 
-  // MP3 is always offered: the download step converts it with ffmpeg
   const audio: VideoFormat[] = [
-    { id: "mp3", kind: "audio", quality: "High", extension: "MP3", size: "—", hasAudio: true },
+    {
+      id: "mp3",
+      kind: "audio",
+      quality: "High",
+      extension: "MP3",
+      size: duration ? `~${formatBytes(((192 * 1000) / 8) * duration)}` : "—",
+      hasAudio: true,
+    },
   ];
 
   if (best) {
@@ -85,7 +93,7 @@ const buildAudioFormats = (formats: RawFormat[]): VideoFormat[] => {
       kind: "audio",
       quality: "Original",
       extension: best.ext.toUpperCase(),
-      size: sizeLabel(best),
+      size: sizeLabel(best, duration),
       hasAudio: true,
     });
   }
@@ -131,6 +139,9 @@ export const fetchVideoInfo = async (url: string): Promise<VideoInfo> => {
     platform: platform.name,
     duration: raw.duration ? formatDuration(raw.duration) : "--:--",
     thumbnail: raw.thumbnail ?? null,
-    formats: [...buildVideoFormats(formats), ...buildAudioFormats(formats)],
+    formats: [
+      ...buildVideoFormats(formats, raw.duration),
+      ...buildAudioFormats(formats, raw.duration),
+    ],
   };
 };
