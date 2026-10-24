@@ -1,10 +1,9 @@
-import path from "path";
-
 import compression from "compression";
 import cors from "cors";
 import express, { Application } from "express";
 import helmet from "helmet";
 
+import { errorHandler, notFoundHandler } from "./middlewares";
 import { routes } from "./routes";
 
 const app: Application = express();
@@ -21,9 +20,8 @@ const corsOptions = {
       callback(new Error("Not allowed by CORS"));
     }
   },
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization"],
-  credentials: true,
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept"],
   optionsSuccessStatus: 200,
 };
 
@@ -34,13 +32,12 @@ app.set("trust proxy", 1);
 app.use(helmet());
 app.use(compression());
 app.use(cors(corsOptions));
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
-
-// Static files
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+app.use(express.json({ limit: "10kb" }));
 
 // Routes
 app.use("/", routes);
+
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 export default app;
