@@ -7,7 +7,7 @@ import ffmpegPath from "ffmpeg-static";
 import youtubeDl from "youtube-dl-exec";
 
 import { detectPlatform, statusCodes } from "@/constants";
-import { AppError } from "@/utils";
+import { AppError, formatBytes, formatDuration } from "@/utils";
 
 export type DownloadKind = "video" | "audio";
 export type StreamName = "video" | "audio" | "merge";
@@ -20,6 +20,11 @@ export type ProgressEvent = {
   streamTotal: number | null;
   speed: string | null;
   eta: string | null;
+  // Progress across the whole job, measured against the size estimate the
+  // client sent. Null when no estimate was provided.
+  overallPercent: number | null;
+  overallLoaded: number | null;
+  overallTotal: number | null;
   message?: string;
 };
 
@@ -38,10 +43,10 @@ type Job = {
   cleanup: () => Promise<void>;
   createdAt: number;
   kind: DownloadKind;
-  streamIndex: number;
-  currentStreamTotal: number | null;
-  lastPercent: number | null;
+  formatId: string;
   mergeStarted: boolean;
+  estimatedSize: number | null;
+  streamBytes: Map<string, number>;
 };
 
 const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
@@ -61,91 +66,139 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-const parseSizeToBytes = (raw: string): number | null => {
-  const match = raw.trim().match(/^([\d.]+)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/i);
+// yt-dlp prints one machine-readable line per progress update instead of
+// the human-readable "[download] 12.3% of ~ 50MiB" line. This tells us exactly
+// which format is downloading, so we no longer have to guess when the video
+// stream ends and the audio stream begins.
+const PROGRESS_PREFIX = "AIOP";
 
-  if (!match) return null;
+const PROGRESS_TEMPLATE = [
+  `download:${PROGRESS_PREFIX}`,
+  "%(info.format_id)s",
+  "%(progress.status)s",
+  "%(progress.downloaded_bytes)s",
+  "%(progress.total_bytes)s",
+  "%(progress.total_bytes_estimate)s",
+  "%(progress.fragment_index)s",
+  "%(progress.fragment_count)s",
+  "%(progress.speed)s",
+  "%(progress.eta)s",
+].join("|");
 
-  const value = Number(match[1]);
-  const unit = match[2].toUpperCase();
+const toNumber = (value: string | undefined): number | null => {
+  if (!value || value === "NA" || value === "None") return null;
 
-  const multiplier = unit.startsWith("T")
-    ? 1024 ** 4
-    : unit.startsWith("G")
-      ? 1024 ** 3
-      : unit.startsWith("M")
-        ? 1024 ** 2
-        : unit.startsWith("K")
-          ? 1024
-          : 1;
-
-  return Math.round(value * multiplier);
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 };
 
-const getStreamName = (job: Job): StreamName => {
-  if (job.kind === "audio") return "audio";
-  return job.streamIndex === 0 ? "video" : "audio";
-};
+type OverallProgress = Pick<ProgressEvent, "overallPercent" | "overallLoaded" | "overallTotal">;
 
-const createProgressEvent = (
-  stream: StreamName,
-  percent: number,
-  total: number | null,
-  speed: string | null = null,
-  eta: string | null = null,
-): ProgressEvent => {
-  const safePercent = Math.min(100, Math.max(0, percent));
+// The estimate is fixed, so this percentage can't jump around the way
+// yt-dlp's own per-stream estimates do. It is capped at 99 until the file is
+// ready, and the total grows only if the real size exceeds the estimate.
+const getOverall = (job: Job): OverallProgress => {
+  let loaded = 0;
+
+  for (const bytes of job.streamBytes.values()) loaded += bytes;
+
+  if (!job.estimatedSize) {
+    return { overallPercent: null, overallLoaded: loaded, overallTotal: null };
+  }
+
+  const total = Math.max(job.estimatedSize, loaded);
 
   return {
-    phase: stream === "merge" ? "merging" : "preparing",
-    stream,
-    streamPercent: safePercent,
-    streamLoaded: total !== null ? Math.round((safePercent / 100) * total) : null,
-    streamTotal: total,
-    speed,
-    eta,
+    overallPercent: Math.min(99, (loaded / total) * 100),
+    overallLoaded: loaded,
+    overallTotal: total,
   };
 };
 
-const updateStreamIndex = (percent: number, job: Job) => {
-  // Detect the start of the audio stream after the video stream finishes.
-  if (
-    job.kind === "video" &&
-    job.streamIndex === 0 &&
-    job.lastPercent !== null &&
-    job.lastPercent >= 99 &&
-    percent < 10
-  ) {
-    job.streamIndex = 1;
-    job.currentStreamTotal = null;
+const parseTemplateLine = (line: string, job: Job): ProgressEvent | null => {
+  const [
+    ,
+    formatId,
+    status,
+    downloaded,
+    totalBytes,
+    totalEstimate,
+    fragmentIndexRaw,
+    fragmentCountRaw,
+    speedRaw,
+    etaRaw,
+  ] = line.split("|");
+
+  const stream: StreamName =
+    job.kind === "audio" ? "audio" : formatId === job.formatId ? "video" : "audio";
+
+  const downloadedBytes = toNumber(downloaded);
+  const exactTotal = toNumber(totalBytes);
+  const estimatedTotal = toNumber(totalEstimate);
+  const fragmentIndex = toNumber(fragmentIndexRaw);
+  const fragmentCount = toNumber(fragmentCountRaw);
+  const speed = toNumber(speedRaw);
+  const eta = toNumber(etaRaw);
+
+  const isFragmented = fragmentCount !== null && fragmentCount > 0 && fragmentIndex !== null;
+  const finished = status === "finished";
+
+  // For fragmented (HLS/DASH) streams yt-dlp's byte estimate is based on the
+  // first fragments, which are small, so the byte percentage races ahead and
+  // then falls back. Fragment count is stable, so prefer it.
+  let percent = 0;
+
+  if (finished) {
+    percent = 100;
+  } else if (isFragmented) {
+    percent = (Math.max(0, (fragmentIndex as number) - 1) / (fragmentCount as number)) * 100;
+  } else {
+    const total = exactTotal ?? estimatedTotal;
+
+    if (total && total > 0 && downloadedBytes !== null) {
+      percent = (downloadedBytes / total) * 100;
+    }
   }
 
-  job.lastPercent = percent;
+  if (!finished) percent = Math.min(99, Math.max(0, percent));
+
+  // Don't show a size until it is trustworthy: either exact, or an estimate
+  // built from a few fragments.
+  const reliableTotal =
+    exactTotal ??
+    (estimatedTotal !== null && (!isFragmented || (fragmentIndex as number) >= 3)
+      ? estimatedTotal
+      : null);
+
+  if (downloadedBytes !== null) {
+    job.streamBytes.set(formatId || stream, downloadedBytes);
+  }
+
+  const overall = getOverall(job);
+
+  // With a size estimate, the ETA covers the whole job instead of one stream.
+  const overallEta =
+    overall.overallTotal !== null && overall.overallLoaded !== null && speed !== null && speed > 0
+      ? Math.max(0, overall.overallTotal - overall.overallLoaded) / speed
+      : eta;
+
+  return {
+    phase: "preparing",
+    stream,
+    streamPercent: percent,
+    streamLoaded: downloadedBytes,
+    streamTotal: reliableTotal,
+    speed: speed !== null && speed > 0 ? `${formatBytes(speed)}/s` : null,
+    eta: overallEta !== null && overallEta > 0 ? formatDuration(overallEta) : null,
+    ...overall,
+  };
 };
 
 const parseProgressLine = (line: string, job: Job): ProgressEvent | null => {
-  const progressMatch = line.match(
-    /\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+~?\s*([\d.]+\s*(?:B|KB|MB|GB|TB|KiB|MiB|GiB|TiB))(?:\s+at\s+([\d.]+\s*(?:B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)\/s))?(?:\s+ETA\s+([^\s]+))?/i,
-  );
+  const trimmed = line.trim();
 
-  if (progressMatch) {
-    const percent = Number(progressMatch[1]);
-
-    updateStreamIndex(percent, job);
-
-    const stream = getStreamName(job);
-    const reportedTotal = parseSizeToBytes(progressMatch[2]);
-
-    // Always use the latest total reported by yt-dlp.
-    job.currentStreamTotal = reportedTotal;
-
-    return createProgressEvent(
-      stream,
-      percent,
-      reportedTotal,
-      progressMatch[3] ?? null,
-      progressMatch[4] && progressMatch[4] !== "Unknown" ? progressMatch[4] : null,
-    );
+  if (trimmed.startsWith(`${PROGRESS_PREFIX}|`)) {
+    return parseTemplateLine(trimmed, job);
   }
 
   if (/^\s*\[Merger\]|\[VideoRemuxer\]|Merging formats into/i.test(line)) {
@@ -159,6 +212,7 @@ const parseProgressLine = (line: string, job: Job): ProgressEvent | null => {
       streamTotal: null,
       speed: null,
       eta: null,
+      ...getOverall(job),
       message: "Merging media…",
     };
   }
@@ -174,6 +228,7 @@ const parseProgressLine = (line: string, job: Job): ProgressEvent | null => {
       streamTotal: null,
       speed: null,
       eta: null,
+      ...getOverall(job),
       message: "Processing media…",
     };
   }
@@ -185,6 +240,7 @@ export const startDownloadJob = async (
   url: string,
   formatId: string,
   kind: DownloadKind,
+  estimatedSize: number | null,
   onProgress: (event: ProgressEvent) => void,
 ): Promise<string> => {
   if (!detectPlatform(url)) {
@@ -208,10 +264,10 @@ export const startDownloadJob = async (
     cleanup,
     createdAt: Date.now(),
     kind,
-    streamIndex: 0,
-    currentStreamTotal: null,
-    lastPercent: null,
+    formatId,
     mergeStarted: false,
+    estimatedSize,
+    streamBytes: new Map(),
   };
 
   jobs.set(id, job);
@@ -225,6 +281,7 @@ export const startDownloadJob = async (
     ffmpegLocation: ffmpegPath ?? undefined,
     newline: true,
     progress: true,
+    progressTemplate: PROGRESS_TEMPLATE,
   };
 
   const flags =
@@ -303,6 +360,9 @@ export const startDownloadJob = async (
         streamTotal: fileInfo.size,
         speed: null,
         eta: null,
+        overallPercent: 100,
+        overallLoaded: fileInfo.size,
+        overallTotal: fileInfo.size,
       });
     } catch (error) {
       job.status = "error";
@@ -318,6 +378,9 @@ export const startDownloadJob = async (
         streamTotal: null,
         speed: null,
         eta: null,
+        overallPercent: null,
+        overallLoaded: null,
+        overallTotal: null,
         message: job.error,
       });
 

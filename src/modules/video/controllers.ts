@@ -13,7 +13,7 @@ export const getVideoInfo = catchAsync(async (req, res) => {
 });
 
 export const startDownload = catchAsync(async (req, res) => {
-  const { url, formatId, kind } = downloadSchema.parse(req.query);
+  const { url, formatId, kind, size } = downloadSchema.parse(req.query);
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -38,7 +38,7 @@ export const startDownload = catchAsync(async (req, res) => {
     }
   };
 
-  const jobId = await startDownloadJob(url, formatId, kind, (event) => send(event));
+  const jobId = await startDownloadJob(url, formatId, kind, size ?? null, (event) => send(event));
 
   // Send the job ID before progress events so the frontend can
   // reliably locate the prepared file after the stream ends.
@@ -50,6 +50,9 @@ export const startDownload = catchAsync(async (req, res) => {
         streamPercent: null,
         streamLoaded: null,
         streamTotal: null,
+        overallPercent: null,
+        overallLoaded: null,
+        overallTotal: null,
         speed: null,
         eta: null,
         jobId,

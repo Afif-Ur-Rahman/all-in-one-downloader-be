@@ -20,4 +20,11 @@ export const downloadSchema = z.object({
     .max(64, "That format is invalid")
     .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "That format is invalid"),
   kind: z.enum(["video", "audio"], { error: "Kind must be video or audio" }),
+  size: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(2 * 1024 ** 3)
+    .optional()
+    .catch(undefined),
 });
