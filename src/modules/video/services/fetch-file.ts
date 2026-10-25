@@ -5,7 +5,7 @@ import { statusCodes } from "@/constants/statusCodes";
 import { AppError } from "@/utils/app-error";
 import { formatBytes, formatDuration } from "@/utils/format";
 
-import type { VideoFormat, VideoInfo } from "./types";
+import { VideoFormat, VideoInfo } from "../types";
 
 type RawFormat = {
   format_id: string;

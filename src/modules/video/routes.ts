@@ -1,9 +1,12 @@
 import { Router } from "express";
 
-import { getVideoInfo } from "./controllers";
+import { downloadLimiter, downloadSlot } from "@/middlewares";
+
+import { downloadVideo, getVideoInfo } from "./controllers";
 
 const router = Router();
 
 router.post("/info", getVideoInfo);
+router.get("/download", downloadLimiter, downloadSlot, downloadVideo);
 
 export { router as videoRoutes };
