@@ -20,8 +20,6 @@ export type ProgressEvent = {
   streamTotal: number | null;
   speed: string | null;
   eta: string | null;
-  // Progress across the whole job, measured against the size estimate the
-  // client sent. Null when no estimate was provided.
   overallPercent: number | null;
   overallLoaded: number | null;
   overallTotal: number | null;
@@ -34,9 +32,15 @@ export type PreparedDownload = {
   cleanup: () => Promise<void>;
 };
 
+type DownloadProcess = {
+  kill?: (signal?: NodeJS.Signals) => void;
+};
+
 type Job = {
   id: string;
-  status: "running" | "ready" | "error";
+  status: "running" | "paused" | "ready" | "error";
+  url: string;
+  directory: string;
   filePath?: string;
   fileName?: string;
   error?: string;
@@ -47,11 +51,14 @@ type Job = {
   mergeStarted: boolean;
   estimatedSize: number | null;
   streamBytes: Map<string, number>;
+  process: DownloadProcess | null;
 };
+
+type JobProgress = (event: ProgressEvent) => void;
 
 const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_FILE_SIZE = "500M";
-const JOB_TTL_MS = 10 * 60 * 1000;
+const JOB_TTL_MS = 30 * 60 * 1000;
 
 const jobs = new Map<string, Job>();
 
@@ -66,10 +73,6 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-// yt-dlp prints one machine-readable line per progress update instead of
-// the human-readable "[download] 12.3% of ~ 50MiB" line. This tells us exactly
-// which format is downloading, so we no longer have to guess when the video
-// stream ends and the audio stream begins.
 const PROGRESS_PREFIX = "AIOP";
 
 const PROGRESS_TEMPLATE = [
@@ -94,16 +97,17 @@ const toNumber = (value: string | undefined): number | null => {
 
 type OverallProgress = Pick<ProgressEvent, "overallPercent" | "overallLoaded" | "overallTotal">;
 
-// The estimate is fixed, so this percentage can't jump around the way
-// yt-dlp's own per-stream estimates do. It is capped at 99 until the file is
-// ready, and the total grows only if the real size exceeds the estimate.
 const getOverall = (job: Job): OverallProgress => {
   let loaded = 0;
 
   for (const bytes of job.streamBytes.values()) loaded += bytes;
 
   if (!job.estimatedSize) {
-    return { overallPercent: null, overallLoaded: loaded, overallTotal: null };
+    return {
+      overallPercent: null,
+      overallLoaded: loaded,
+      overallTotal: null,
+    };
   }
 
   const total = Math.max(job.estimatedSize, loaded);
@@ -143,9 +147,6 @@ const parseTemplateLine = (line: string, job: Job): ProgressEvent | null => {
   const isFragmented = fragmentCount !== null && fragmentCount > 0 && fragmentIndex !== null;
   const finished = status === "finished";
 
-  // For fragmented (HLS/DASH) streams yt-dlp's byte estimate is based on the
-  // first fragments, which are small, so the byte percentage races ahead and
-  // then falls back. Fragment count is stable, so prefer it.
   let percent = 0;
 
   if (finished) {
@@ -162,8 +163,6 @@ const parseTemplateLine = (line: string, job: Job): ProgressEvent | null => {
 
   if (!finished) percent = Math.min(99, Math.max(0, percent));
 
-  // Don't show a size until it is trustworthy: either exact, or an estimate
-  // built from a few fragments.
   const reliableTotal =
     exactTotal ??
     (estimatedTotal !== null && (!isFragmented || (fragmentIndex as number) >= 3)
@@ -176,7 +175,6 @@ const parseTemplateLine = (line: string, job: Job): ProgressEvent | null => {
 
   const overall = getOverall(job);
 
-  // With a size estimate, the ETA covers the whole job instead of one stream.
   const overallEta =
     overall.overallTotal !== null && overall.overallLoaded !== null && speed !== null && speed > 0
       ? Math.max(0, overall.overallTotal - overall.overallLoaded) / speed
@@ -236,12 +234,141 @@ const parseProgressLine = (line: string, job: Job): ProgressEvent | null => {
   return null;
 };
 
+const executeJob = async (job: Job, onProgress: JobProgress) => {
+  const baseFlags = {
+    noPlaylist: true,
+    noWarnings: true,
+    restrictFilenames: true,
+    maxFilesize: MAX_FILE_SIZE,
+    output: path.join(job.directory, "%(title).80s.%(ext)s"),
+    ffmpegLocation: ffmpegPath ?? undefined,
+    newline: true,
+    progress: true,
+    progressTemplate: PROGRESS_TEMPLATE,
+
+    // This allows yt-dlp to continue from .part / .ytdl files after pause.
+    continue: true,
+  };
+
+  const flags =
+    job.kind === "audio"
+      ? job.formatId === "mp3"
+        ? {
+            ...baseFlags,
+            format: "bestaudio/best",
+            extractAudio: true,
+            audioFormat: "mp3",
+            audioQuality: "192K",
+          }
+        : {
+            ...baseFlags,
+            format: job.formatId,
+          }
+      : {
+          ...baseFlags,
+          format: `${job.formatId}+bestaudio/${job.formatId}`,
+          mergeOutputFormat: "mp4",
+        };
+
+  try {
+    const subprocess = youtubeDl.exec(job.url, flags, {
+      timeout: DOWNLOAD_TIMEOUT_MS,
+    });
+
+    job.process = subprocess as unknown as DownloadProcess;
+
+    let buffer = "";
+
+    const handleChunk = (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        const event = parseProgressLine(line, job);
+        if (event) onProgress(event);
+      }
+    };
+
+    subprocess.stdout?.on("data", handleChunk);
+    subprocess.stderr?.on("data", handleChunk);
+
+    await subprocess;
+
+    if (buffer.trim()) {
+      const event = parseProgressLine(buffer, job);
+      if (event) onProgress(event);
+    }
+
+    if (job.status === "paused") return;
+
+    const files = await readdir(job.directory);
+    const fileName = files.find((file) => !/\.(?:part|ytdl|temp)$/i.test(file));
+
+    if (!fileName) {
+      throw new Error("No output file was produced");
+    }
+
+    const filePath = path.join(job.directory, fileName);
+    const fileInfo = await stat(filePath);
+
+    if (!fileInfo.isFile() || fileInfo.size === 0) {
+      throw new Error("Empty file");
+    }
+
+    job.status = "ready";
+    job.filePath = filePath;
+    job.fileName = fileName;
+    job.process = null;
+
+    onProgress({
+      phase: "ready",
+      stream: "merge",
+      streamPercent: 100,
+      streamLoaded: fileInfo.size,
+      streamTotal: fileInfo.size,
+      speed: null,
+      eta: null,
+      overallPercent: 100,
+      overallLoaded: fileInfo.size,
+      overallTotal: fileInfo.size,
+    });
+  } catch (error) {
+    if (job.status === "paused") return;
+
+    job.status = "error";
+    job.error = (error as { timedOut?: boolean })?.timedOut
+      ? "The download took too long. Please try a lower quality."
+      : "We couldn't download this format. Try another quality.";
+
+    onProgress({
+      phase: "error",
+      stream: null,
+      streamPercent: null,
+      streamLoaded: null,
+      streamTotal: null,
+      speed: null,
+      eta: null,
+      overallPercent: null,
+      overallLoaded: null,
+      overallTotal: null,
+      message: job.error,
+    });
+
+    await job.cleanup();
+    jobs.delete(job.id);
+  } finally {
+    job.process = null;
+  }
+};
+
 export const startDownloadJob = async (
   url: string,
   formatId: string,
   kind: DownloadKind,
   estimatedSize: number | null,
-  onProgress: (event: ProgressEvent) => void,
+  onProgress: JobProgress,
 ): Promise<string> => {
   if (!detectPlatform(url)) {
     throw new AppError("This link is not from a supported platform", statusCodes.BAD_REQUEST);
@@ -261,6 +388,8 @@ export const startDownloadJob = async (
   const job: Job = {
     id,
     status: "running",
+    url,
+    directory,
     cleanup,
     createdAt: Date.now(),
     kind,
@@ -268,128 +397,71 @@ export const startDownloadJob = async (
     mergeStarted: false,
     estimatedSize,
     streamBytes: new Map(),
+    process: null,
   };
 
   jobs.set(id, job);
 
-  const baseFlags = {
-    noPlaylist: true,
-    noWarnings: true,
-    restrictFilenames: true,
-    maxFilesize: MAX_FILE_SIZE,
-    output: path.join(directory, "%(title).80s.%(ext)s"),
-    ffmpegLocation: ffmpegPath ?? undefined,
-    newline: true,
-    progress: true,
-    progressTemplate: PROGRESS_TEMPLATE,
-  };
-
-  const flags =
-    kind === "audio"
-      ? formatId === "mp3"
-        ? {
-            ...baseFlags,
-            format: "bestaudio/best",
-            extractAudio: true,
-            audioFormat: "mp3",
-            audioQuality: "192K",
-          }
-        : {
-            ...baseFlags,
-            format: formatId,
-          }
-      : {
-          ...baseFlags,
-          format: `${formatId}+bestaudio/${formatId}`,
-          mergeOutputFormat: "mp4",
-        };
-
-  void (async () => {
-    try {
-      const subprocess = youtubeDl.exec(url, flags, {
-        timeout: DOWNLOAD_TIMEOUT_MS,
-      });
-
-      let buffer = "";
-
-      const handleChunk = (chunk: Buffer | string) => {
-        buffer += chunk.toString();
-
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          const event = parseProgressLine(line, job);
-          if (event) onProgress(event);
-        }
-      };
-
-      subprocess.stdout?.on("data", handleChunk);
-      subprocess.stderr?.on("data", handleChunk);
-
-      await subprocess;
-
-      if (buffer.trim()) {
-        const event = parseProgressLine(buffer, job);
-        if (event) onProgress(event);
-      }
-
-      const files = await readdir(directory);
-      const fileName = files.find((file) => !/\.(?:part|ytdl|temp)$/i.test(file));
-
-      if (!fileName) {
-        throw new Error("No output file was produced");
-      }
-
-      const filePath = path.join(directory, fileName);
-      const fileInfo = await stat(filePath);
-
-      if (!fileInfo.isFile() || fileInfo.size === 0) {
-        throw new Error("Empty file");
-      }
-
-      job.status = "ready";
-      job.filePath = filePath;
-      job.fileName = fileName;
-
-      onProgress({
-        phase: "ready",
-        stream: "merge",
-        streamPercent: 100,
-        streamLoaded: fileInfo.size,
-        streamTotal: fileInfo.size,
-        speed: null,
-        eta: null,
-        overallPercent: 100,
-        overallLoaded: fileInfo.size,
-        overallTotal: fileInfo.size,
-      });
-    } catch (error) {
-      job.status = "error";
-      job.error = (error as { timedOut?: boolean })?.timedOut
-        ? "The download took too long. Please try a lower quality."
-        : "We couldn't download this format. Try another quality.";
-
-      onProgress({
-        phase: "error",
-        stream: null,
-        streamPercent: null,
-        streamLoaded: null,
-        streamTotal: null,
-        speed: null,
-        eta: null,
-        overallPercent: null,
-        overallLoaded: null,
-        overallTotal: null,
-        message: job.error,
-      });
-
-      await cleanup();
-      jobs.delete(id);
-    }
-  })();
+  void executeJob(job, onProgress);
 
   return id;
+};
+
+export const pauseDownloadJob = (id: string): boolean => {
+  const job = jobs.get(id);
+
+  if (!job) return false;
+
+  if (job.status !== "running" && job.status !== "ready") {
+    return false;
+  }
+
+  if (job.status === "running") {
+    try {
+      job.process?.kill?.("SIGTERM");
+    } catch {
+      // Ignore kill failures.
+    }
+  }
+
+  job.status = "paused";
+  job.process = null;
+  job.createdAt = Date.now();
+
+  return true;
+};
+
+export const resumeDownloadJob = (id: string, onProgress: JobProgress): boolean => {
+  const job = jobs.get(id);
+
+  if (!job || job.status !== "paused") return false;
+
+  job.createdAt = Date.now();
+
+  if (job.filePath && job.fileName) {
+    job.status = "ready";
+
+    onProgress({
+      phase: "ready",
+      stream: "merge",
+      streamPercent: 100,
+      streamLoaded: null,
+      streamTotal: null,
+      speed: null,
+      eta: null,
+      overallPercent: 100,
+      overallLoaded: null,
+      overallTotal: null,
+    });
+
+    return true;
+  }
+
+  job.status = "running";
+
+  void executeJob(job, onProgress);
+
+  return true;
 };
 
 export const getJob = (id: string) => jobs.get(id);

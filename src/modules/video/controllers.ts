@@ -3,7 +3,14 @@ import { catchAsync } from "@/utils";
 
 import { downloadSchema, infoSchema } from "./schema";
 import { fetchVideoInfo } from "./services";
-import { startDownloadJob, getJob, takeJobFile, type ProgressEvent } from "./services/download";
+import {
+  getJob,
+  pauseDownloadJob,
+  resumeDownloadJob,
+  startDownloadJob,
+  takeJobFile,
+  type ProgressEvent,
+} from "./services/download";
 
 export const getVideoInfo = catchAsync(async (req, res) => {
   const { url } = infoSchema.parse(req.body ?? {});
@@ -12,24 +19,22 @@ export const getVideoInfo = catchAsync(async (req, res) => {
   res.status(statusCodes.OK).json(info);
 });
 
-export const startDownload = catchAsync(async (req, res) => {
-  const { url, formatId, kind, size } = downloadSchema.parse(req.query);
-
+const writeSseHeaders = (res: import("express").Response) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
+};
 
-  let terminalEventSent = false;
-
-  const send = (data: ProgressEvent & { jobId?: string }) => {
+const createSseSender = (
+  res: import("express").Response,
+): ((data: ProgressEvent & { jobId?: string }) => void) => {
+  return (data) => {
     if (res.writableEnded || res.destroyed) return;
 
     res.write(`data: ${JSON.stringify(data)}\n\n`);
 
     if (data.phase === "ready" || data.phase === "error") {
-      terminalEventSent = true;
-
       setTimeout(() => {
         if (!res.writableEnded && !res.destroyed) {
           res.end();
@@ -37,32 +42,98 @@ export const startDownload = catchAsync(async (req, res) => {
       }, 30);
     }
   };
+};
+
+export const startDownload = catchAsync(async (req, res) => {
+  const { url, formatId, kind, size } = downloadSchema.parse(req.query);
+
+  writeSseHeaders(res);
+
+  const send = createSseSender(res);
 
   const jobId = await startDownloadJob(url, formatId, kind, size ?? null, (event) => send(event));
 
-  // Send the job ID before progress events so the frontend can
-  // reliably locate the prepared file after the stream ends.
-  if (!res.writableEnded && !res.destroyed) {
-    res.write(
-      `data: ${JSON.stringify({
-        phase: "preparing",
-        stream: null,
-        streamPercent: null,
-        streamLoaded: null,
-        streamTotal: null,
-        overallPercent: null,
-        overallLoaded: null,
-        overallTotal: null,
-        speed: null,
-        eta: null,
-        jobId,
-      })}\n\n`,
-    );
+  send({
+    phase: "preparing",
+    stream: null,
+    streamPercent: null,
+    streamLoaded: null,
+    streamTotal: null,
+    overallPercent: null,
+    overallLoaded: null,
+    overallTotal: null,
+    speed: null,
+    eta: null,
+    jobId,
+  });
+});
+
+export const pauseDownload = catchAsync(async (req, res) => {
+  const jobId = req.params.jobId;
+
+  if (!jobId || typeof jobId !== "string") {
+    res.status(statusCodes.BAD_REQUEST).json({
+      message: "Invalid job id",
+    });
+    return;
   }
 
-  // Normally the download completes asynchronously. If a terminal
-  // event arrived first, the stream has already been scheduled to close.
-  void terminalEventSent;
+  const paused = pauseDownloadJob(jobId);
+
+  if (!paused) {
+    res.status(statusCodes.CONFLICT).json({
+      message: "Download cannot be paused",
+    });
+    return;
+  }
+
+  res.status(statusCodes.OK).json({
+    message: "Download paused",
+  });
+});
+
+export const resumeDownload = catchAsync(async (req, res) => {
+  const jobId = req.params.jobId;
+
+  if (!jobId || typeof jobId !== "string") {
+    res.status(statusCodes.BAD_REQUEST).json({
+      message: "Invalid job id",
+    });
+    return;
+  }
+
+  const job = getJob(jobId);
+
+  if (!job || job.status !== "paused") {
+    res.status(statusCodes.CONFLICT).json({
+      message: "Download cannot be resumed",
+    });
+    return;
+  }
+
+  writeSseHeaders(res);
+
+  const send = createSseSender(res);
+
+  send({
+    phase: "preparing",
+    stream: null,
+    streamPercent: null,
+    streamLoaded: null,
+    streamTotal: null,
+    overallPercent: null,
+    overallLoaded: null,
+    overallTotal: null,
+    speed: null,
+    eta: null,
+    jobId,
+  });
+
+  const resumed = resumeDownloadJob(jobId, (event) => send(event));
+
+  if (!resumed) {
+    res.end();
+  }
 });
 
 export const downloadJobFile = catchAsync(async (req, res, next) => {
@@ -88,7 +159,7 @@ export const downloadJobFile = catchAsync(async (req, res, next) => {
       return;
     }
 
-    if (job.status === "running") {
+    if (job.status === "running" || job.status === "paused") {
       res.status(statusCodes.ACCEPTED).json({
         message: "Still preparing",
       });
@@ -103,30 +174,16 @@ export const downloadJobFile = catchAsync(async (req, res, next) => {
 
   const { filePath, fileName, cleanup } = prepared;
 
-  if (res.destroyed) {
-    await cleanup();
-    return;
-  }
-
-  let cleaned = false;
-
-  const cleanOnce = async () => {
-    if (cleaned) return;
-    cleaned = true;
-    await cleanup();
-  };
-
-  res.on("close", () => {
-    void cleanOnce();
-  });
-
   res.setHeader("Cache-Control", "no-store");
 
   res.download(filePath, fileName, (error) => {
     if (error && !res.headersSent) {
       next(error);
+      return;
     }
 
-    void cleanOnce();
+    if (!error) {
+      void cleanup();
+    }
   });
 });
