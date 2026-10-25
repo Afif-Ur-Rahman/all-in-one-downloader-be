@@ -22,6 +22,7 @@ const corsOptions = {
   },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept"],
+  exposedHeaders: ["Content-Disposition"],
   optionsSuccessStatus: 200,
 };
 
