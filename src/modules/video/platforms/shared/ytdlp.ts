@@ -1,13 +1,12 @@
 import youtubeDl from "youtube-dl-exec";
 
-import { detectPlatform } from "@/constants/platforms";
 import { statusCodes } from "@/constants/statusCodes";
 import { AppError } from "@/utils/app-error";
 import { formatBytes, formatDuration } from "@/utils/format";
 
-import { VideoFormat, VideoInfo } from "../types";
+import type { VideoFormat, VideoInfo } from "../../types";
 
-type RawFormat = {
+export type RawFormat = {
   format_id: string;
   ext: string;
   vcodec?: string | null;
@@ -19,7 +18,7 @@ type RawFormat = {
   filesize_approx?: number | null;
 };
 
-type RawInfo = {
+export type RawInfo = {
   title?: string;
   uploader?: string;
   channel?: string;
@@ -50,7 +49,7 @@ const sizeLabel = (format: RawFormat, duration?: number): string => {
   return "—";
 };
 
-const buildVideoFormats = (formats: RawFormat[], duration?: number): VideoFormat[] => {
+export const buildVideoFormats = (formats: RawFormat[], duration?: number): VideoFormat[] => {
   const byHeight = new Map<number, RawFormat>();
 
   formats.filter(isVideoFormat).forEach((format) => {
@@ -71,7 +70,7 @@ const buildVideoFormats = (formats: RawFormat[], duration?: number): VideoFormat
     }));
 };
 
-const buildAudioFormats = (formats: RawFormat[], duration?: number): VideoFormat[] => {
+export const buildAudioFormats = (formats: RawFormat[], duration?: number): VideoFormat[] => {
   const best = formats
     .filter(isAudioOnly)
     .sort((a, b) => (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0))[0];
@@ -101,19 +100,14 @@ const buildAudioFormats = (formats: RawFormat[], duration?: number): VideoFormat
   return audio;
 };
 
-export const fetchVideoInfo = async (url: string): Promise<VideoInfo> => {
-  const platform = detectPlatform(url);
-
-  if (!platform) {
-    throw new AppError("This link is not from a supported platform", statusCodes.BAD_REQUEST);
-  }
-
-  let raw: RawInfo;
-
+export const fetchRawInfo = async (
+  url: string,
+  flags: Record<string, unknown> = {},
+): Promise<RawInfo> => {
   try {
-    raw = (await youtubeDl(
+    return (await youtubeDl(
       url,
-      { dumpSingleJson: true, noWarnings: true, noPlaylist: true },
+      { dumpSingleJson: true, noWarnings: true, noPlaylist: true, ...flags },
       { timeout: 30000 },
     )) as unknown as RawInfo;
   } catch (error) {
@@ -130,13 +124,15 @@ export const fetchVideoInfo = async (url: string): Promise<VideoInfo> => {
       statusCodes.UNPROCESSABLE_ENTITY,
     );
   }
+};
 
+export const toVideoInfo = (raw: RawInfo, platformName: string): VideoInfo => {
   const formats = raw.formats ?? [];
 
   return {
     title: raw.title ?? "Untitled video",
     author: raw.uploader ?? raw.channel ?? "Unknown",
-    platform: platform.name,
+    platform: platformName,
     duration: raw.duration ? formatDuration(raw.duration) : "--:--",
     thumbnail: raw.thumbnail ?? null,
     formats: [
