@@ -4,6 +4,12 @@ import { statusCodes } from "@/constants/statusCodes";
 import { AppError } from "@/utils/app-error";
 import { formatBytes, formatDuration } from "@/utils/format";
 
+import {
+  activatePlatformCookies,
+  areCookiesDisabled,
+  disablePlatformCookies,
+} from "./platform-auth";
+
 import type { VideoFormat, VideoInfo } from "../../types";
 
 export type RawFormat = {
@@ -26,6 +32,27 @@ export type RawInfo = {
   thumbnail?: string;
   formats?: RawFormat[];
 };
+
+type FetchRawInfoOptions = {
+  platformName?: string;
+};
+
+const ACCOUNT_FLAG_PATTERNS = [
+  /login/i,
+  /log in/i,
+  /sign in/i,
+  /checkpoint/i,
+  /account.*locked/i,
+  /account.*disabled/i,
+  /session expired/i,
+  /cookies.*no longer valid/i,
+  /confirm your identity/i,
+  /security check/i,
+  /not logged in/i,
+];
+
+const isAccountFlagError = (message: string): boolean =>
+  ACCOUNT_FLAG_PATTERNS.some((pattern) => pattern.test(message));
 
 const isVideoFormat = (format: RawFormat) =>
   format.vcodec != null && format.vcodec !== "none" && !!format.height;
@@ -100,10 +127,35 @@ export const buildAudioFormats = (formats: RawFormat[], duration?: number): Vide
   return audio;
 };
 
+const AUTH_ERROR_PATTERNS = [
+  /login/i,
+  /log in/i,
+  /sign in/i,
+  /signin/i,
+  /checkpoint/i,
+  /account.*locked/i,
+  /account.*disabled/i,
+  /session expired/i,
+  /cookies.*no longer valid/i,
+  /confirm your identity/i,
+  /security check/i,
+  /not logged in/i,
+  /confirm you.?re not a bot/i,
+];
+
+const isAuthError = (message: string): boolean =>
+  AUTH_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 export const fetchRawInfo = async (
   url: string,
   flags: Record<string, unknown> = {},
+  options: FetchRawInfoOptions = {},
 ): Promise<RawInfo> => {
+  const platformName = options.platformName ?? "Platform";
+
   try {
     return (await youtubeDl(
       url,
@@ -118,11 +170,71 @@ export const fetchRawInfo = async (
       );
     }
 
+    const rawMessage = error instanceof Error ? error.message : String(error);
+
+    if (isAccountFlagError(rawMessage)) {
+      disablePlatformCookies(platformName, "Login, checkpoint, or account-flag response detected.");
+
+      throw new AppError(
+        `${platformName} is requiring verification. Cookie-based access was disabled automatically.`,
+        statusCodes.UNPROCESSABLE_ENTITY,
+      );
+    }
+
     console.error(`[yt-dlp] failed for ${url}`, error);
+
     throw new AppError(
       "We couldn't fetch this video. Check that the link is correct and the video is public.",
       statusCodes.UNPROCESSABLE_ENTITY,
     );
+  }
+};
+
+type FetchWithCookieFallbackOptions = {
+  platformName: string;
+  baseFlags: Record<string, unknown>;
+  cookieFlags: Record<string, unknown>;
+};
+
+export const fetchRawInfoWithCookieFallback = async (
+  url: string,
+  { platformName, baseFlags, cookieFlags }: FetchWithCookieFallbackOptions,
+): Promise<RawInfo> => {
+  try {
+    return await fetchRawInfo(url, baseFlags);
+  } catch (firstError) {
+    const firstMessage = getErrorMessage(firstError);
+
+    if (!isAuthError(firstMessage)) {
+      throw firstError;
+    }
+
+    const hasCookies = Boolean(cookieFlags.cookies);
+
+    if (!hasCookies || areCookiesDisabled(platformName)) {
+      throw firstError;
+    }
+
+    console.warn(`[${platformName}] Auth error without cookies. Retrying with cookies.`);
+
+    try {
+      const result = await fetchRawInfo(url, cookieFlags);
+
+      activatePlatformCookies(platformName);
+
+      return result;
+    } catch (cookieError) {
+      const cookieMessage = getErrorMessage(cookieError);
+
+      if (isAuthError(cookieMessage)) {
+        disablePlatformCookies(
+          platformName,
+          "Cookie retry also received an auth, checkpoint, or flag response.",
+        );
+      }
+
+      throw cookieError;
+    }
   }
 };
 
