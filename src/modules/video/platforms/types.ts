@@ -1,4 +1,4 @@
-import type { VideoInfo } from "../types";
+import { VideoInfo } from "./shared";
 
 export type DownloadKind = "video" | "audio";
 
