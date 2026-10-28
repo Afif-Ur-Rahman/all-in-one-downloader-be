@@ -44,6 +44,7 @@ export const youtubeService: PlatformService = {
         platformName,
         baseFlags,
         cookieFlags,
+        cookiesFirst: true,
       }),
       platformName,
     ),

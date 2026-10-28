@@ -30,7 +30,7 @@ export const fetchRawInfo = async (
         noPlaylist: true,
         ...flags,
       },
-      { timeout: 30000 },
+      { timeout: 90000 },
     )) as unknown as RawInfo;
   } catch (error) {
     if ((error as { timedOut?: boolean }).timedOut) {
@@ -48,8 +48,33 @@ export const fetchRawInfo = async (
 
 export const fetchRawInfoWithCookieFallback = async (
   url: string,
-  { platformName, baseFlags, cookieFlags }: FetchWithCookieFallbackOptions,
+  { platformName, baseFlags, cookieFlags, cookiesFirst }: FetchWithCookieFallbackOptions,
 ): Promise<RawInfo> => {
+  const hasCookies = Boolean(cookieFlags.cookies);
+
+  if (cookiesFirst && hasCookies && !areCookiesDisabled(platformName)) {
+    try {
+      const result = await fetchRawInfo(url, cookieFlags, { platformName });
+
+      activatePlatformCookies(platformName);
+
+      return result;
+    } catch (cookieError) {
+      const cookieMessage = getErrorMessage(cookieError);
+
+      console.error(`[${platformName}] Cookie attempt failed. Raw yt-dlp error:`, cookieError);
+
+      if (isAuthError(cookieMessage)) {
+        disablePlatformCookies(
+          platformName,
+          "Cookies were rejected on the first attempt with an auth, checkpoint, or flag response.",
+        );
+      }
+
+      throw cookieError;
+    }
+  }
+
   try {
     return await fetchRawInfo(url, baseFlags, { platformName });
   } catch (firstError) {
@@ -58,8 +83,6 @@ export const fetchRawInfoWithCookieFallback = async (
     if (!isAuthError(firstMessage)) {
       throw firstError;
     }
-
-    const hasCookies = Boolean(cookieFlags.cookies);
 
     if (!hasCookies || areCookiesDisabled(platformName)) {
       throw firstError;

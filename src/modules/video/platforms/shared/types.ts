@@ -45,4 +45,5 @@ export type FetchWithCookieFallbackOptions = {
   platformName: string;
   baseFlags: Record<string, unknown>;
   cookieFlags: Record<string, unknown>;
+  cookiesFirst?: boolean;
 };
