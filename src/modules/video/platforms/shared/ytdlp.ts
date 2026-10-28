@@ -33,19 +33,8 @@ export const fetchRawInfo = async (
   } catch (error) {
     if ((error as { timedOut?: boolean }).timedOut) {
       throw new AppError(
-        "The platform took too long to respond. Please try again.",
+        `The ${platformName} took too long to respond. Please try again.`,
         statusCodes.GATEWAY_TIMEOUT,
-      );
-    }
-
-    const message = getErrorMessage(error);
-
-    if (isAuthError(message)) {
-      disablePlatformCookies(platformName, "Login, checkpoint, or account-flag response detected.");
-
-      throw new AppError(
-        `${platformName} is requiring verification. Cookie-based access was disabled automatically.`,
-        statusCodes.UNPROCESSABLE_ENTITY,
       );
     }
 
@@ -87,6 +76,8 @@ export const fetchRawInfoWithCookieFallback = async (
       return result;
     } catch (cookieError) {
       const cookieMessage = getErrorMessage(cookieError);
+
+      console.error(`[${platformName}] Cookie retry failed. Raw yt-dlp error:`, cookieError);
 
       if (isAuthError(cookieMessage)) {
         disablePlatformCookies(

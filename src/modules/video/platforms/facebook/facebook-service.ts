@@ -11,7 +11,6 @@ import type { PlatformService } from "../types";
 
 const platformName = "Facebook";
 
-// Facebook's "sd" and "hd" formats already contain audio.
 const PROGRESSIVE_FORMAT_IDS = new Set(["sd", "hd"]);
 
 const baseFlags = buildPlatformBaseFlags({
