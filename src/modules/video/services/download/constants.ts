@@ -1,6 +1,6 @@
-export const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
-export const MAX_FILE_SIZE = "500M";
-export const JOB_TTL_MS = 30 * 60 * 1000;
+export const DOWNLOAD_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const MAX_FILE_SIZE = "20G";
+export const JOB_TTL_MS = 24 * 60 * 60 * 1000;
 export const CLEANUP_INTERVAL_MS = 60_000;
 
 export const PROGRESS_PREFIX = "AIOP";

@@ -10,6 +10,8 @@ setInterval(() => {
   const now = Date.now();
 
   for (const [id, job] of jobs) {
+    if (job.status === "running") continue;
+
     if (now - job.createdAt > JOB_TTL_MS) {
       void job.cleanup();
       jobs.delete(id);
