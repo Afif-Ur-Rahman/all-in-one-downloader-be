@@ -123,7 +123,7 @@ export const buildPlatformCookieFlags = ({
   const state = getState(platformName);
   const flags = buildPlatformBaseFlags({ platformName, proxy });
 
-  if (!cookieFile || state.disabled || !state.activated) {
+  if (!cookieFile || state.disabled) {
     return flags;
   }
 

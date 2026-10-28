@@ -22,6 +22,8 @@ const cookieFlags = buildPlatformCookieFlags({
   proxy: YOUTUBE_PROXY || undefined,
 });
 
+console.log("[YouTube] Cookie flags prepared:", Object.keys(cookieFlags));
+
 export const youtubeService: PlatformService = {
   id: "youtube",
 
