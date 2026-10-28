@@ -11,16 +11,27 @@ import type { PlatformService } from "../types";
 
 const platformName = "YouTube";
 
-const baseFlags = buildPlatformBaseFlags({
-  platformName,
-  proxy: YOUTUBE_PROXY || undefined,
-});
+const ytFlags = {
+  jsRuntimes: "node",
+  remoteComponents: "ejs:github",
+};
 
-const cookieFlags = buildPlatformCookieFlags({
-  platformName,
-  cookieFile: YOUTUBE_COOKIES_FILE || undefined,
-  proxy: YOUTUBE_PROXY || undefined,
-});
+const baseFlags = {
+  ...buildPlatformBaseFlags({
+    platformName,
+    proxy: YOUTUBE_PROXY || undefined,
+  }),
+  ...ytFlags,
+};
+
+const cookieFlags = {
+  ...buildPlatformCookieFlags({
+    platformName,
+    cookieFile: YOUTUBE_COOKIES_FILE || undefined,
+    proxy: YOUTUBE_PROXY || undefined,
+  }),
+  ...ytFlags,
+};
 
 console.log("[YouTube] Cookie flags prepared:", Object.keys(cookieFlags));
 
