@@ -1,6 +1,6 @@
 import { FACEBOOK_COOKIES_FILE, FACEBOOK_PROXY } from "@/constants/env";
 
-import { buildDefaultDownloadFlags, fetchRawInfoWithCookieFallback, toVideoInfo } from "../shared";
+import { buildDefaultDownloadFlags, fetchVideoInfo, toVideoInfo } from "../shared";
 import {
   areCookiesActivated,
   buildPlatformBaseFlags,
@@ -29,7 +29,7 @@ export const facebookService: PlatformService = {
 
   getInfo: async (url) =>
     toVideoInfo(
-      await fetchRawInfoWithCookieFallback(url, {
+      await fetchVideoInfo(url, {
         platformName,
         baseFlags,
         cookieFlags,

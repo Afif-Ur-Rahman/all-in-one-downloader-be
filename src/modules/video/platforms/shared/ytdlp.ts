@@ -12,6 +12,8 @@ import {
 
 import type { FetchRawInfoOptions, FetchWithCookieFallbackOptions, RawInfo } from "./types";
 
+export * from "./types";
+
 export const fetchRawInfo = async (
   url: string,
   flags: Record<string, unknown> = {},
@@ -40,10 +42,7 @@ export const fetchRawInfo = async (
 
     console.error(`[yt-dlp] failed for ${url}`, error);
 
-    throw new AppError(
-      "We couldn't fetch this video. Check that the link is correct and the video is public.",
-      statusCodes.UNPROCESSABLE_ENTITY,
-    );
+    throw error;
   }
 };
 
@@ -52,7 +51,7 @@ export const fetchRawInfoWithCookieFallback = async (
   { platformName, baseFlags, cookieFlags }: FetchWithCookieFallbackOptions,
 ): Promise<RawInfo> => {
   try {
-    return await fetchRawInfo(url, baseFlags);
+    return await fetchRawInfo(url, baseFlags, { platformName });
   } catch (firstError) {
     const firstMessage = getErrorMessage(firstError);
 
@@ -69,7 +68,9 @@ export const fetchRawInfoWithCookieFallback = async (
     console.warn(`[${platformName}] Auth error without cookies. Retrying with cookies.`);
 
     try {
-      const result = await fetchRawInfo(url, cookieFlags);
+      const result = await fetchRawInfo(url, cookieFlags, {
+        platformName,
+      });
 
       activatePlatformCookies(platformName);
 
@@ -88,5 +89,32 @@ export const fetchRawInfoWithCookieFallback = async (
 
       throw cookieError;
     }
+  }
+};
+
+export const fetchVideoInfo = async (
+  url: string,
+  options: FetchWithCookieFallbackOptions,
+): Promise<RawInfo> => {
+  try {
+    return await fetchRawInfoWithCookieFallback(url, options);
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    const message = getErrorMessage(error);
+
+    if (isAuthError(message)) {
+      throw new AppError(
+        `${options.platformName} is requiring verification. Please try again later.`,
+        statusCodes.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    throw new AppError(
+      "We couldn't fetch this video. Check that the link is correct and the video is public.",
+      statusCodes.UNPROCESSABLE_ENTITY,
+    );
   }
 };
