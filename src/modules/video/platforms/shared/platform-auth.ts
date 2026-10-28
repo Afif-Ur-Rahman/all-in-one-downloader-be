@@ -38,8 +38,6 @@ export const activatePlatformCookies = (platformName: string): void => {
   if (state.disabled) return;
 
   state.activated = true;
-
-  console.info(`[${platformName}] Cookies activated after auth error.`);
 };
 
 export const disablePlatformCookies = (platformName: string, reason: string): void => {

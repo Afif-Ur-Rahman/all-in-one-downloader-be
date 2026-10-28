@@ -40,7 +40,7 @@ export const fetchRawInfo = async (
       );
     }
 
-    console.error(`[yt-dlp] failed for ${url}`, error);
+    console.error(`[yt-dlp] failed for ${url}: ${getErrorMessage(error).split("\n")[0]}`);
 
     throw error;
   }
@@ -61,8 +61,6 @@ export const fetchRawInfoWithCookieFallback = async (
       return result;
     } catch (cookieError) {
       const cookieMessage = getErrorMessage(cookieError);
-
-      console.error(`[${platformName}] Cookie attempt failed. Raw yt-dlp error:`, cookieError);
 
       if (isAuthError(cookieMessage)) {
         disablePlatformCookies(

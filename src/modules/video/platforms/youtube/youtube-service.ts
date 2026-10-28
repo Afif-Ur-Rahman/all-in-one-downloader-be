@@ -33,8 +33,6 @@ const cookieFlags = {
   ...ytFlags,
 };
 
-console.log("[YouTube] Cookie flags prepared:", Object.keys(cookieFlags));
-
 export const youtubeService: PlatformService = {
   id: "youtube",
 
