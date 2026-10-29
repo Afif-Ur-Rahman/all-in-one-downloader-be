@@ -21,7 +21,9 @@ export type RawFormat = {
   ext: string;
   vcodec?: string | null;
   acodec?: string | null;
+  width?: number | null;
   height?: number | null;
+  url?: string | null;
   abr?: number | null;
   tbr?: number | null;
   filesize?: number | null;

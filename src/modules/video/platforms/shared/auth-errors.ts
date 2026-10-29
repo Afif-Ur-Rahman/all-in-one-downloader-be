@@ -12,6 +12,8 @@ const AUTH_ERROR_PATTERNS = [
   /security checkpoint/i,
   /checkpoint required/i,
   /confirm your identity/i,
+  /empty media response/i,
+  /rate-limit reached/i,
 ];
 
 export const isAuthError = (message: string): boolean =>

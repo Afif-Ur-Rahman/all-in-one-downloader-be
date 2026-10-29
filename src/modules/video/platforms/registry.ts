@@ -3,6 +3,7 @@ import { statusCodes } from "@/constants/statusCodes";
 import { AppError } from "@/utils/app-error";
 
 import { facebookService } from "./facebook";
+import { instagramService } from "./instagram";
 import { youtubeService } from "./youtube";
 
 import type { PlatformService } from "./types";
@@ -10,6 +11,7 @@ import type { PlatformService } from "./types";
 const services: Record<string, PlatformService> = {
   [youtubeService.id]: youtubeService,
   [facebookService.id]: facebookService,
+  [instagramService.id]: instagramService,
 };
 
 export const resolvePlatformService = (url: string): PlatformService => {

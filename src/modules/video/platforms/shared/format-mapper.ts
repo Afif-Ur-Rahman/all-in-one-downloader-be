@@ -30,24 +30,27 @@ const sizeLabel = (format: RawFormat, duration?: number): string => {
   return "—";
 };
 
+const resolution = (format: RawFormat): number =>
+  format.width && format.height ? Math.min(format.width, format.height) : (format.height as number);
+
 export const buildVideoFormats = (formats: RawFormat[], duration?: number): VideoFormat[] => {
-  const byHeight = new Map<number, RawFormat>();
+  const byResolution = new Map<number, RawFormat>();
 
   formats.filter(isVideoFormat).forEach((format) => {
-    const height = format.height as number;
-    const current = byHeight.get(height);
+    const value = resolution(format);
+    const current = byResolution.get(value);
 
     if (!current || score(format) > score(current)) {
-      byHeight.set(height, format);
+      byResolution.set(value, format);
     }
   });
 
-  return [...byHeight.entries()]
+  return [...byResolution.entries()]
     .sort(([a], [b]) => b - a)
-    .map(([height, format]) => ({
+    .map(([value, format]) => ({
       id: format.format_id,
       kind: "video" as const,
-      quality: `${height}p`,
+      quality: `${value}p`,
       extension: format.ext.toUpperCase(),
       size: sizeLabel(format, duration),
       hasAudio: hasAudioTrack(format),
