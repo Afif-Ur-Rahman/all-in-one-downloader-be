@@ -34,6 +34,7 @@ export const tiktokService: PlatformService = {
       platformName,
       baseFlags,
       cookieFlags,
+      cookiesFirst: true,
     });
 
     const allFormats = raw.formats ?? [];
