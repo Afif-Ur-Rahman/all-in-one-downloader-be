@@ -4,6 +4,7 @@
   "description": "API for All in One Downloader (Express, TypeScript, yt-dlp)",
   "main": "dist/index.js",
   "scripts": {
+    "postinstall": "node scripts/install-yt-dlp.mjs",
     "start": "node dist/index.js",
     "dev": "nodemon src/index.ts",
     "build": "tsc && tsc-alias",

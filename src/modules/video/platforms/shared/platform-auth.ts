@@ -104,6 +104,10 @@ export const buildPlatformBaseFlags = ({
 }): Record<string, unknown> => {
   const flags: Record<string, unknown> = {};
 
+  if (platformName.toLowerCase() === "tiktok") {
+    flags.referer = "https://www.tiktok.com/";
+  }
+
   const resolvedProxy = validateProxy(platformName, proxy);
 
   if (resolvedProxy) {
